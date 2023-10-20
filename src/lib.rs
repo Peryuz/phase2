@@ -234,39 +234,33 @@ impl MPCParameters {
         let f = &mut BufReader::with_capacity(1024 * 1024, f);
 
         let read_g1 = |reader: &mut BufReader<File>| -> io::Result<G1Affine> {
-            let mut repr = G1Uncompressed::empty();
+            let mut repr = <G1Affine as UncompressedEncoding>::Uncompressed::default();
             reader.read_exact(repr.as_mut())?;
 
-            repr.to_affine_unchecked()
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-                .and_then(|e| {
-                    if e.is_identity() {
-                        Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "point at infinity",
-                        ))
-                    } else {
-                        Ok(e)
-                    }
-                })
+            let e = <G1Affine as UncompressedEncoding>::from_uncompressed_unchecked(&repr).unwrap();
+            if e.is_identity().into() {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "point at infinity",
+                ))
+            } else {
+                Ok(e)
+            }
         };
 
         let read_g2 = |reader: &mut BufReader<File>| -> io::Result<G2Affine> {
-            let mut repr = G2Uncompressed::empty();
+            let mut repr = <G2Affine as UncompressedEncoding>::Uncompressed::default();
             reader.read_exact(repr.as_mut())?;
 
-            repr.to_affine_unchecked()
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-                .and_then(|e| {
-                    if e.is_identity() {
-                        Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "point at infinity",
-                        ))
-                    } else {
-                        Ok(e)
-                    }
-                })
+            let e = <G2Affine as UncompressedEncoding>::from_uncompressed_unchecked(&repr).unwrap();
+            if e.is_identity().into() {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "point at infinity",
+                ))
+            } else {
+                Ok(e)
+            }
         };
 
         let alpha = read_g1(f)?;
@@ -430,7 +424,7 @@ impl MPCParameters {
         // Don't allow any elements be unconstrained, so that
         // the L query is always fully dense.
         for e in l.iter() {
-            if e.is_identity() {
+            if e.is_identity().into() {
                 return Err(SynthesisError::UnconstrainedVariable);
             }
         }
@@ -439,9 +433,9 @@ impl MPCParameters {
             alpha_g1: alpha,
             beta_g1: beta_g1,
             beta_g2: beta_g2,
-            gamma_g2: G2Affine::one(),
-            delta_g1: G1Affine::one(),
-            delta_g2: G2Affine::one(),
+            gamma_g2: G2Affine::generator(),
+            delta_g1: G1Affine::generator(),
+            delta_g2: G2Affine::generator(),
             ic: ic.into_iter().map(|e| e.to_affine()).collect(),
         };
 
@@ -509,9 +503,9 @@ impl MPCParameters {
         let (pubkey, privkey) = keypair(rng, self);
 
         fn batch_exp<C: PairingCurveAffine>(bases: &mut [C], coeff: C::Scalar) {
-            let coeff = coeff.into_repr();
+            let coeff = coeff.to_repr();
 
-            let mut projective = vec![C::Projective::zero(); bases.len()];
+            let mut projective = vec![C::Curve::identity(); bases.len()];
             let cpus = num_cpus::get();
             let chunk_size = if bases.len() < cpus {
                 1
@@ -529,7 +523,7 @@ impl MPCParameters {
                         let mut wnaf = Wnaf::new();
 
                         for (base, projective) in bases.iter_mut().zip(projective.iter_mut()) {
-                            *projective = wnaf.base(base.into_projective(), 1).scalar(coeff);
+                            *projective = wnaf.base(base.to_curve(), 1).scalar(coeff);
                         }
                     });
                 }
@@ -550,7 +544,7 @@ impl MPCParameters {
             }
         }
 
-        let delta_inv = privkey.delta.inverse().expect("nonzero");
+        let delta_inv = privkey.delta.invert().expect("nonzero");
         let mut l = (&self.params.l[..]).to_vec();
         let mut h = (&self.params.h[..]).to_vec();
         batch_exp(&mut l, delta_inv);
@@ -630,7 +624,7 @@ impl MPCParameters {
         let mut sink = HashWriter::new(sink);
         sink.write_all(&initial_params.cs_hash[..]).unwrap();
 
-        let mut current_delta = G1Affine::one();
+        let mut current_delta = G1Affine::generator();
         let mut result = vec![];
 
         for pubkey in &self.contributions {
@@ -683,8 +677,8 @@ impl MPCParameters {
 
         // Current parameters should have consistent delta in G2
         if !same_ratio(
-            (G1Affine::one(), current_delta),
-            (G2Affine::one(), self.params.vk.delta_g2),
+            (G1Affine::generator(), current_delta),
+            (G2Affine::generator(), self.params.vk.delta_g2),
         ) {
             return Err(());
         }
@@ -692,14 +686,14 @@ impl MPCParameters {
         // H and L queries should be updated with delta^-1
         if !same_ratio(
             merge_pairs(&initial_params.params.h, &self.params.h),
-            (self.params.vk.delta_g2, G2Affine::one()), // reversed for inverse
+            (self.params.vk.delta_g2, G2Affine::generator()), // reversed for inverse
         ) {
             return Err(());
         }
 
         if !same_ratio(
             merge_pairs(&initial_params.params.l, &self.params.l),
-            (self.params.vk.delta_g2, G2Affine::one()), // reversed for inverse
+            (self.params.vk.delta_g2, G2Affine::generator()), // reversed for inverse
         ) {
             return Err(());
         }
@@ -783,8 +777,7 @@ impl PublicKey {
         let mut g2_repr = <G2Affine as UncompressedEncoding>::Uncompressed::default();
 
         reader.read_exact(g1_repr.as_mut())?;
-        let delta_after = G1Affine::from_uncompressed(g1_repr)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let delta_after = <G1Affine as UncompressedEncoding>::from_uncompressed(&g1_repr).unwrap();
 
         if delta_after.is_identity() {
             return Err(io::Error::new(
@@ -794,10 +787,9 @@ impl PublicKey {
         }
 
         reader.read_exact(g1_repr.as_mut())?;
-        let s = G1Affine::from_uncompressed(g1_repr)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let s = <G1Affine as UncompressedEncoding>::from_uncompressed(&g1_repr).unwrap();
 
-        if s.is_zero() {
+        if s.is_identity().into() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "point at infinity",
@@ -805,10 +797,9 @@ impl PublicKey {
         }
 
         reader.read_exact(g1_repr.as_mut())?;
-        let s_delta = G1Affine::from_uncompressed(g1_repr)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let s_delta = <G1Affine as UncompressedEncoding>::from_uncompressed(&g1_repr).unwrap();
 
-        if s_delta.is_zero() {
+        if s_delta.is_identity().into() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "point at infinity",
@@ -816,10 +807,9 @@ impl PublicKey {
         }
 
         reader.read_exact(g2_repr.as_mut())?;
-        let r_delta = G2Affine::from_uncompressed(g2_repr)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let r_delta = <G2Affine as UncompressedEncoding>::from_uncompressed(&g2_repr).unwrap();
 
-        if r_delta.is_zero() {
+        if r_delta.is_identity().into() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "point at infinity",
@@ -947,8 +937,8 @@ pub fn verify_contribution(before: &MPCParameters, after: &MPCParameters) -> Res
 
     // Current parameters should have consistent delta in G2
     if !same_ratio(
-        (G1Affine::one(), pubkey.delta_after),
-        (G2Affine::one(), after.params.vk.delta_g2),
+        (G1Affine::generator(), pubkey.delta_after),
+        (G2Affine::generator(), after.params.vk.delta_g2),
     ) {
         return Err(());
     }
@@ -996,7 +986,7 @@ fn same_ratio<G1: PairingCurveAffine>(g1: (G1, G1), g2: (G1::Pair, G1::Pair)) ->
 /// e(g, (as)*r1 + (bs)*r2 + (cs)*r3) = e(g^s, a*r1 + b*r2 + c*r3)
 ///
 /// ... with high probability.
-fn merge_pairs<G: PairingCurveAffine>(v1: &[G], v2: &[G]) -> (G, G) {
+fn merge_pairs<G: Curve>(v1: &[G], v2: &[G]) -> (G, G) {
     use rand::thread_rng;
     use std::sync::{Arc, Mutex};
 
@@ -1024,11 +1014,11 @@ fn merge_pairs<G: PairingCurveAffine>(v1: &[G], v2: &[G]) -> (G, G) {
                 for (v1, v2) in v1.iter().zip(v2.iter()) {
                     let rho = G::Scalar::rand(rng);
                     let mut wnaf = wnaf.scalar(rho.into_repr());
-                    let v1 = wnaf.base(v1.into_projective());
-                    let v2 = wnaf.base(v2.into_projective());
+                    let v1 = wnaf.base(*v1);
+                    let v2 = wnaf.base(*v2);
 
-                    local_s.add_assign(&v1);
-                    local_sx.add_assign(&v2);
+                    local_s.add_assign(v1);
+                    local_sx.add_assign(v2);
                 }
 
                 s.lock().unwrap().add_assign(&local_s);
