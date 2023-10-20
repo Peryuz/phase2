@@ -351,7 +351,7 @@ impl MPCParameters {
                     let alpha_coeffs_g1 = alpha_coeffs_g1.clone();
                     let beta_coeffs_g1 = beta_coeffs_g1.clone();
 
-                    scope.spawn(move || {
+                    scope.spawn(move |_| {
                         for ((((((a_g1, b_g1), b_g2), ext), at), bt), ct) in a_g1
                             .iter_mut()
                             .zip(b_g1.iter_mut())
@@ -377,11 +377,37 @@ impl MPCParameters {
                             }
                         }
 
+                        let mut a_g1_norm = vec![G1Affine::identity(); a_g1.len()];
+                        let mut b_g1_norm = vec![G1Affine::identity(); b_g1.len()];
+                        let mut b_g2_norm = vec![G2Affine::identity(); b_g2.len()];
+                        let mut ext_norm = vec![G1Affine::identity(); a_g1.len()];
+
                         // Batch normalize
-                        G1Projective::batch_normalize(a_g1);
-                        G1Projective::batch_normalize(b_g1);
-                        G2Projective::batch_normalize(b_g2);
-                        G1Projective::batch_normalize(ext);
+                        G1Projective::batch_normalize(a_g1, &mut a_g1_norm);
+                        G1Projective::batch_normalize(b_g1, &mut b_g1_norm);
+                        G2Projective::batch_normalize(b_g2, &mut b_g2_norm);
+                        G1Projective::batch_normalize(ext, &mut ext_norm);
+
+                        let a_g1_norm_proj = a_g1_norm
+                            .into_iter()
+                            .map(|p| p.to_curve())
+                            .collect::<Vec<_>>();
+                        let b_g1_norm_proj = b_g1_norm
+                            .into_iter()
+                            .map(|p| p.to_curve())
+                            .collect::<Vec<_>>();
+                        let b_g2_norm_proj = b_g2_norm
+                            .into_iter()
+                            .map(|p| p.to_curve())
+                            .collect::<Vec<_>>();
+                        let ext_norm_proj = ext_norm
+                            .into_iter()
+                            .map(|p| p.to_curve())
+                            .collect::<Vec<_>>();
+                        a_g1.copy_from_slice(&a_g1_norm_proj);
+                        b_g1.copy_from_slice(&b_g1_norm_proj);
+                        b_g2.copy_from_slice(&b_g2_norm_proj);
+                        ext.copy_from_slice(&ext);
                     });
                 }
             });
@@ -447,19 +473,19 @@ impl MPCParameters {
             // Filter points at infinity away from A/B queries
             a: Arc::new(
                 a_g1.into_iter()
-                    .filter(|e| !e.is_identity().into())
+                    .filter(|e| !Into::<bool>::into(e.is_identity()))
                     .map(|e| e.to_affine())
                     .collect(),
             ),
             b_g1: Arc::new(
                 b_g1.into_iter()
-                    .filter(|e| !e.is_identity().into())
+                    .filter(|e| !Into::<bool>::into(e.is_identity()))
                     .map(|e| e.to_affine())
                     .collect(),
             ),
             b_g2: Arc::new(
                 b_g2.into_iter()
-                    .filter(|e| !e.is_identity().into())
+                    .filter(|e| !Into::<bool>::into(e.is_identity()))
                     .map(|e| e.to_affine())
                     .collect(),
             ),
@@ -503,8 +529,6 @@ impl MPCParameters {
         let (pubkey, privkey) = keypair(rng, self);
 
         fn batch_exp<C: PairingCurveAffine>(bases: &mut [C], coeff: C::Scalar) {
-            let coeff = coeff.to_repr();
-
             let mut projective = vec![C::Curve::identity(); bases.len()];
             let cpus = num_cpus::get();
             let chunk_size = if bases.len() < cpus {
@@ -523,7 +547,7 @@ impl MPCParameters {
                         let mut wnaf = Wnaf::new();
 
                         for (base, projective) in bases.iter_mut().zip(projective.iter_mut()) {
-                            *projective = wnaf.base(base.to_curve(), 1).scalar(coeff);
+                            *projective = wnaf.base(base.to_curve(), 1).scalar(&coeff);
                         }
                     });
                 }
@@ -533,7 +557,13 @@ impl MPCParameters {
             crossbeam::scope(|scope| {
                 for projective in projective.chunks_mut(chunk_size) {
                     scope.spawn(move || {
-                        C::Projective::batch_normalize(projective);
+                        let mut affines = vec![C::identity(); projective.len()];
+                        C::Curve::batch_normalize(projective, &mut affines);
+                        let affines_proj = affines
+                            .into_iter()
+                            .map(|p| p.to_affine())
+                            .collect::<Vec<_>>();
+                        projective.copy_from_slice(&affines_proj);
                     });
                 }
             });
@@ -779,7 +809,7 @@ impl PublicKey {
         reader.read_exact(g1_repr.as_mut())?;
         let delta_after = <G1Affine as UncompressedEncoding>::from_uncompressed(&g1_repr).unwrap();
 
-        if delta_after.is_identity() {
+        if delta_after.is_identity().into() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "point at infinity",
@@ -1047,7 +1077,7 @@ fn keypair<R: Rng>(rng: &mut R, current: &MPCParameters) -> (PublicKey, PrivateK
     let delta: Scalar = rng.gen();
 
     // Compute delta s-pair in G1
-    let s = G1Projective::rand(rng).to_affine();
+    let s = G1Projective::random(rng).to_affine();
     let s_delta = s.mul(delta).to_affine();
 
     // H(cs_hash | <previous pubkeys> | s | s_delta)
